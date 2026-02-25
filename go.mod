@@ -10,8 +10,11 @@ require (
 	github.com/cheggaaa/pb/v3 v3.1.7
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
+	github.com/go-flac/flacpicture v0.3.0
 	github.com/go-flac/flacpicture/v2 v2.0.2
+	github.com/go-flac/flacvorbis v0.2.0
 	github.com/go-flac/flacvorbis/v2 v2.0.2
+	github.com/go-flac/go-flac v1.0.0
 	github.com/go-flac/go-flac/v2 v2.0.4
 	github.com/go-resty/resty/v2 v2.16.5
 	github.com/go-viper/mapstructure/v2 v2.4.0
@@ -21,7 +24,9 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
 	github.com/wneessen/go-mail v0.7.2
-	golang.org/x/sync v0.17.0
+	golang.org/x/image v0.36.0
+	golang.org/x/sync v0.19.0
+	golang.org/x/term v0.40.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -56,7 +61,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.37.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.43.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )

@@ -29,6 +29,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httputil"
 	"os"
 	"path/filepath"
@@ -40,9 +41,9 @@ import (
 	"github.com/chaunsin/netease-cloud-music/api/types"
 	"github.com/chaunsin/netease-cloud-music/api/weapi"
 	"github.com/chaunsin/netease-cloud-music/pkg/log"
+	"github.com/chaunsin/netease-cloud-music/pkg/ncm"
 	"github.com/chaunsin/netease-cloud-music/pkg/utils"
 
-	"github.com/cheggaaa/pb/v3"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/semaphore"
 )
@@ -180,30 +181,30 @@ func (c *Download) execute(ctx context.Context, args []string) error {
 	}
 
 	var (
-		total  = int64(len(songs))
+		//total  = int64(len(songs))
 		failed atomic.Int64
 		sema   = semaphore.NewWeighted(c.opts.Parallel)
-		bar    = pb.Full.Start64(total)
+		pm     = NewProgressManager()
 	)
 	defer func() {
-		bar.Finish()
-		c.cmd.Printf("report total: %v success: %v failed: %v\n", total, total-failed.Load(), failed.Load())
+		pm.Stop()
+		//c.cmd.Printf("report total: %v success: %v failed: %v\n", total, total-failed.Load(), failed.Load())
 	}()
 
-	for _, song := range songs {
+	for i, song := range songs {
 		var song = song
+		var order = i
 		if err := sema.Acquire(ctx, 1); err != nil {
 			return fmt.Errorf("acquire: %w", err)
 		}
 		go func() {
 			defer sema.Release(1)
-			if err := c.download(ctx, cli, request, &song); err != nil {
+			if err := c.download(ctx, cli, request, &song, pm, order); err != nil {
 				failed.Add(1)
 				log.Error("download %s err: %v", song.String(), err)
-				c.cmd.Printf("download %s err: %v\n", song.String(), err)
+				pm.Log(fmt.Sprintf("download %s err: %v", song.String(), err))
 				return
 			}
-			bar.Increment()
 		}()
 	}
 	if err := sema.Acquire(ctx, c.opts.Parallel); err != nil {
@@ -263,11 +264,12 @@ func (c *Download) inputParse(ctx context.Context, args []string, request *weapi
 					}
 					for _, v := range resp.Songs {
 						list = append(list, Music{
-							Id:     v.Id,
-							Name:   v.Name,
-							Artist: v.Ar,
-							Album:  v.Al,
-							Time:   v.Dt,
+							Id:      v.Id,
+							Name:    v.Name,
+							Artist:  v.Ar,
+							Album:   v.Al,
+							AlbumId: v.Al.Id,
+							Time:    v.Dt,
 						})
 					}
 					// todo: 处理版权,状态等有效性校验
@@ -303,11 +305,12 @@ func (c *Download) inputParse(ctx context.Context, args []string, request *weapi
 						}
 						set[id] = struct{}{}
 						list = append(list, Music{
-							Id:     v.Id,
-							Name:   v.Name,
-							Artist: v.Ar,
-							Album:  v.Al,
-							Time:   v.Dt,
+							Id:      v.Id,
+							Name:    v.Name,
+							Artist:  v.Ar,
+							Album:   v.Al,
+							AlbumId: v.Al.Id,
+							Time:    v.Dt,
 						})
 					}
 					// todo: 处理版权,状态等有效性校验
@@ -332,11 +335,12 @@ func (c *Download) inputParse(ctx context.Context, args []string, request *weapi
 					}
 					set[id] = struct{}{}
 					list = append(list, Music{
-						Id:     v.Id,
-						Name:   v.Name,
-						Artist: v.Ar,
-						Album:  v.Al,
-						Time:   v.Dt,
+						Id:      v.Id,
+						Name:    v.Name,
+						Artist:  v.Ar,
+						Album:   v.Al,
+						AlbumId: v.Al.Id,
+						Time:    v.Dt,
 					})
 				}
 				// todo: 处理版权,状态等有效性校验
@@ -362,12 +366,37 @@ func (c *Download) inputParse(ctx context.Context, args []string, request *weapi
 					set[id] = struct{}{}
 					tmp = append(tmp, v.Id)
 				}
+				var trackMap = make(map[int64]Music)
+				for _, v := range playlist.Playlist.Tracks {
+					trackMap[v.Id] = Music{
+						Id:      v.Id,
+						Name:    v.Name,
+						Artist:  v.Ar,
+						Album:   v.Al,
+						AlbumId: v.Al.Id,
+						Time:    v.Dt,
+					}
+				}
 
 				// 分页处理
 				pages, _ := utils.SplitSlice(tmp, 500)
 				for _, p := range pages {
-					var c = make([]weapi.SongDetailReqList, 0, len(p))
-					for _, v := range p {
+					// 检查这些 ID 是否都在 trackMap 中
+					var missingIds []int64
+					for _, id := range p {
+						if _, ok := trackMap[id]; !ok {
+							missingIds = append(missingIds, id)
+						} else {
+							list = append(list, trackMap[id])
+						}
+					}
+
+					if len(missingIds) == 0 {
+						continue
+					}
+
+					var c = make([]weapi.SongDetailReqList, 0, len(missingIds))
+					for _, v := range missingIds {
 						c = append(c, weapi.SongDetailReqList{Id: fmt.Sprintf("%v", v), V: 0})
 					}
 					resp, err := request.SongDetail(ctx, &weapi.SongDetailReq{C: c})
@@ -383,11 +412,12 @@ func (c *Download) inputParse(ctx context.Context, args []string, request *weapi
 					}
 					for _, v := range resp.Songs {
 						list = append(list, Music{
-							Id:     v.Id,
-							Name:   v.Name,
-							Artist: v.Ar,
-							Album:  v.Al,
-							Time:   v.Dt,
+							Id:      v.Id,
+							Name:    v.Name,
+							Artist:  v.Ar,
+							Album:   v.Al,
+							AlbumId: v.Al.Id,
+							Time:    v.Dt,
 						})
 					}
 					// todo: 处理版权,状态等有效性校验
@@ -403,7 +433,7 @@ func (c *Download) inputParse(ctx context.Context, args []string, request *weapi
 	return list, nil
 }
 
-func (c *Download) download(ctx context.Context, cli *api.Client, request *weapi.Api, music *Music) error {
+func (c *Download) download(ctx context.Context, cli *api.Client, request *weapi.Api, music *Music, pm *ProgressManager, order int) error {
 	var (
 		songId    = music.Id
 		songIdStr = fmt.Sprintf("%d", songId)
@@ -424,76 +454,39 @@ func (c *Download) download(ctx context.Context, cli *api.Client, request *weapi
 	}
 
 	// 获取下载链接地址
-	var downReq = &weapi.SongDownloadUrlReq{
-		Id: songIdStr,
-		Br: fmt.Sprintf("%d", quality.Br),
+	var downReq = &weapi.SongPlayerV1Req{
+		Ids:         types.IntsString{songId},
+		Level:       types.Level(c.opts.Level),
+		EncodeType:  "flac",
+		ImmerseType: "c51",
 	}
-	downResp, err := request.SongDownloadUrl(ctx, downReq)
+	downResp, err := request.SongPlayerV1(ctx, downReq)
 	if err != nil {
-		return fmt.Errorf("SongDownloadUrl(%v): %w", songId, err)
+		return fmt.Errorf("SongPlayerV1(%v): %w", songId, err)
 	}
 	if downResp.Code != 200 {
-		return fmt.Errorf("SongDownloadUrl(%v) err: %+v", songId, downResp)
+		return fmt.Errorf("SongPlayerV1(%v) err: %+v", songId, downResp)
+	}
+	if len(downResp.Data) <= 0 {
+		return fmt.Errorf("SongPlayerV1(%v) is empty: %+v", songId, downResp)
 	}
 	// 歌曲变灰则不能下载
-	if downResp.Data.Code != 200 || downResp.Data.Url == "" {
+	if downResp.Data[0].Code != 200 || downResp.Data[0].Url == "" {
 		var msg error
-		switch downResp.Data.Code {
+		switch downResp.Data[0].Code {
 		case -110:
-			msg = fmt.Errorf("无音源(%v) br: %v code: %v", songId, quality.Br, downResp.Data.Code)
+			msg = fmt.Errorf("无音源(%v) br: %v code: %v", songId, quality.Br, downResp.Data[0].Code)
 		case -105: // todo: 待确定完善,目前测试发现,当用户没有会员权益时,会返回-105，其他情况可能也会返回此值
 			fallthrough
 		default:
-			msg = fmt.Errorf("资源已下架或无版权(%v) br: %v code: %v", songId, quality.Br, downResp.Data.Code)
+			msg = fmt.Errorf("资源已下架或无版权(%v) br: %v code: %v", songId, quality.Br, downResp.Data[0].Code)
 		}
 		log.Warn("资源已下架或无版权(%v) detail: %+v", songId, downResp)
 		return msg
 	}
 
-	// var downReq = &weapi.SongPlayerReq{
-	// 	Ids: []int64{songId},
-	// 	Br:  fmt.Sprintf("%d", quality.Br),
-	// }
-	// downResp, err := request.SongPlayer(ctx, downReq)
-	// if err != nil {
-	// 	return fmt.Errorf("SongPlayer(%v): %w", songId, err)
-	// }
-	// if downResp.Code != 200 {
-	// 	return fmt.Errorf("SongPlayer(%v) err: %+v", songId, downResp)
-	// }
-	// if len(downResp.Data) <= 0 {
-	// 	return fmt.Errorf("SongPlayer(%v) is empty: %+v", songId, downResp)
-	// }
-	// // 歌曲变灰则不能下载
-	// if downResp.Data[0].Code != 200 || downResp.Data[0].Url == "" {
-	// 	return fmt.Errorf("资源已下架或无版权(%v) code: %v", songId, downResp.Data[0].Code)
-	// }
-
-	// todo: 待解决传入得音质和下载的品质不准确问题，尝试传入os=pc
-	// var downReq = &weapi.SongPlayerV1Req{
-	// 	Ids:         []int64{songId},
-	// 	Level:       types.Level(c.opts.Level),
-	// 	EncodeType:  "flac",
-	// 	ImmerseType: "",
-	// }
-	// downResp, err := request.SongPlayerV1(ctx, downReq)
-	// if err != nil {
-	// 	return fmt.Errorf("SongPlayerV1(%v): %w", songId, err)
-	// }
-	// if downResp.Code != 200 {
-	// 	return fmt.Errorf("SongPlayerV1(%v) err: %+v", songId, downResp)
-	// }
-	// if len(downResp.Data) <= 0 {
-	// 	return fmt.Errorf("SongPlayerV1(%v) is empty: %+v", songId, downResp)
-	// }
-	// // 歌曲变灰则不能下载
-	// if downResp.Data[0].Code != 200 || downResp.Data[0].Url == "" {
-	// 	return fmt.Errorf("资源已下架或无版权(%v) code: %v", songId, downResp.Data[0].Code)
-	// }
-
 	var (
-		// drd = downResp.Data[0]
-		drd      = downResp.Data
+		drd      = downResp.Data[0]
 		dest     = filepath.Join(c.opts.Output, fmt.Sprintf("%s - %s.%s", music.ArtistString(), music.NameString(), strings.ToLower(drd.Type)))
 		tempName = fmt.Sprintf("download-*-%s.tmp", music.NameString())
 	)
@@ -506,7 +499,22 @@ func (c *Download) download(ctx context.Context, cli *api.Client, request *weapi
 	defer file.Close()
 
 	// 下载
-	resp, err := cli.Download(ctx, drd.Url, nil, nil, file, nil)
+	// 创建进度条
+	tracker := &ProgressTracker{
+		Total:    drd.Size,
+		Filename: fmt.Sprintf("%s - %s", music.ArtistString(), music.NameString()),
+		Order:    order,
+	}
+	pm.Add(tracker)
+	defer pm.Finish(tracker)
+
+	// 包装 writer
+	writer := &ProgressWriter{
+		Writer:  file,
+		Tracker: tracker,
+	}
+
+	resp, err := cli.Download(ctx, drd.Url, nil, nil, writer, nil)
 	if err != nil {
 		_ = os.Remove(file.Name())
 		return fmt.Errorf("download: %w", err)
@@ -541,17 +549,89 @@ func (c *Download) download(ctx context.Context, cli *api.Client, request *weapi
 
 	// 设置歌曲tag值
 	if c.opts.Tag {
-		// todo:
-	}
+		// 显示关闭文件避免Windows系统无法重命名错误: The process cannot access the file because it is being used by another process
+		if err := file.Close(); err != nil {
+			log.Error("close %s file err: %s", file.Name(), err)
+			_ = os.Remove(file.Name())
+			return err
+		}
 
-	// 避免文件重名
-	for i := 1; utils.FileExists(dest); i++ {
-		dest = filepath.Join(c.opts.Output, fmt.Sprintf("%s - %s(%d).%s", music.ArtistString(), music.NameString(), i, strings.ToLower(drd.Type)))
-	}
-	// 显示关闭文件避免Windows系统无法重命名错误: The process cannot access the file because it is being used by another process
-	if err := file.Close(); err != nil {
-		log.Error("close %s file err: %s", file.Name(), err)
-		_ = os.Remove(file.Name())
+		var meta = &ncm.MetadataMusic{
+			Id:       music.Id,
+			Name:     music.Name,
+			Album:    music.Album.Name,
+			AlbumPic: music.Album.PicUrl,
+			Format:   drd.Type,
+		}
+		for _, ar := range music.Artist {
+			meta.Artists = append(meta.Artists, ncm.Artist{Name: ar.Name, Id: ar.Id})
+		}
+
+		// 获取歌词
+		lyricResp, err := request.Lyric(ctx, &weapi.LyricReq{Id: music.Id})
+		if err != nil {
+			log.Warn("get lyric %d err: %v", music.Id, err)
+		} else if lyricResp.Code == 200 {
+			if lyricResp.Lrc.Lyric != "" {
+				// todo: 翻译歌词
+				meta.Comment = lyricResp.Lrc.Lyric
+			}
+		}
+
+		// 下载封面
+		var coverData []byte
+		//fmt.Printf("meta.AlbumPic: %s\n", meta.AlbumPic)
+		if meta.AlbumPic != "" {
+			// 移除 URL 中的 query 参数，通常能获取到原图
+			if idx := strings.Index(meta.AlbumPic, "?"); idx > 0 {
+				meta.AlbumPic = meta.AlbumPic[:idx]
+			}
+			resp, err := http.Get(meta.AlbumPic)
+			if err == nil && resp.StatusCode == 200 {
+				coverData, _ = io.ReadAll(resp.Body)
+				resp.Body.Close()
+			} else {
+				log.Warn("download cover %s err: %v", meta.AlbumPic, err)
+			}
+		}
+
+		if len(coverData) == 0 {
+			if music.AlbumId != 0 {
+				albumResp, err := request.Album(ctx, &weapi.AlbumReq{Id: fmt.Sprintf("%d", music.AlbumId)})
+				if err == nil && albumResp.Code == 200 && albumResp.Album.PicUrl != "" {
+					meta.AlbumPic = albumResp.Album.PicUrl
+					// 移除 URL 中的 query 参数，通常能获取到原图
+					if idx := strings.Index(meta.AlbumPic, "?"); idx > 0 {
+						meta.AlbumPic = meta.AlbumPic[:idx]
+					}
+					resp, err := http.Get(meta.AlbumPic)
+					if err == nil && resp.StatusCode == 200 {
+						coverData, _ = io.ReadAll(resp.Body)
+						resp.Body.Close()
+					}
+				}
+			}
+		}
+
+		switch strings.ToLower(drd.Type) {
+		case "mp3":
+			if err := writeID3v2(file.Name(), meta, coverData); err != nil {
+				log.Warn("writeID3v2 %s err: %v", file.Name(), err)
+			}
+		case "flac":
+			if err := writeFlac(file.Name(), meta, coverData); err != nil {
+				log.Warn("writeFlac %s err: %v", file.Name(), err)
+			}
+		default:
+			log.Warn("unsupported tag format: %s", drd.Type)
+		}
+	} else {
+		// 显示关闭文件避免Windows系统无法重命名错误: The process cannot access the file because it is being used by another process
+		if err := file.Close(); err != nil {
+			log.Error("close %s file err: %s", file.Name(), err)
+			_ = os.Remove(file.Name())
+			return err
+		}
 	}
 	if err := os.Rename(file.Name(), dest); err != nil {
 		_ = os.Remove(file.Name())
